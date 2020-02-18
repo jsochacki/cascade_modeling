@@ -1,5 +1,6 @@
-function [cascade] = solve_agc(cascade, receiver, on_off)
+function [cascade_out] = solve_agc(cascade, receiver, on_off)
 
+cascade_out = cascade;
 %Can set different goal metrics (i.e. minimize distortion power)
 %for the AGC but here we will just set
 %the goal metric to set the gain such that the Pin is what we have
@@ -8,36 +9,38 @@ function [cascade] = solve_agc(cascade, receiver, on_off)
 %at the converter and the specified receiver desired signal in level.
 cost_function = @(set_pin, actual_pin) set_pin - actual_pin;
 
+positive_limit = @(input_value) ((input_value >= 0).*input_value + (input_value < 0).*0);
+
 AGC_Resolution = 0.05;
 
 vvas = 0;
 total_range = 0;
 cascade_locations = [];
-for n = 1:1:max(size(cascade))
-   if isfield(cascade{n}, 'gain_range')
+for n = 1:1:max(size(cascade_out))
+   if isfield(cascade_out{n}, 'gain_range')
       %create vva from input structs
-      vva{vvas + 1}.gain_range = cascade{n}.gain_range;
-      vva{vvas + 1}.initial_attenuation = cascade{n}.initial_attenuation;
-      vva{vvas + 1}.base_loss = cascade{n}.base_loss;
-      vva{vvas + 1}.base_pin = cascade{n}.base_pin;
-      vva{vvas + 1}.base_OIP3 = cascade{n}.base_OIP3;
-      vva{vvas + 1}.name = cascade{n}.name;
+      vva{vvas + 1}.gain_range = cascade_out{n}.gain_range;
+      vva{vvas + 1}.initial_attenuation = cascade_out{n}.initial_attenuation;
+      vva{vvas + 1}.base_loss = cascade_out{n}.base_loss;
+      vva{vvas + 1}.base_pin = cascade_out{n}.base_pin;
+      vva{vvas + 1}.base_OIP3 = cascade_out{n}.base_OIP3;
+      vva{vvas + 1}.name = cascade_out{n}.name;
       %create calculation parameters
       vva{vvas + 1}.current_attenuation = vva{vvas + 1}.initial_attenuation;
       vva{vvas + 1}.gain = @(current_attenuation) -vva{vvas + 1}.base_loss - current_attenuation;
       vva{vvas + 1}.pout = @(current_gain) vva{vvas + 1}.base_pin + current_gain;
       vva{vvas + 1}.NF = @(current_gain) -current_gain;
       vva{vvas + 1}.OIP3 = @(current_pout) current_pout + vva{vvas + 1}.base_OIP3;
-      %Cleanup cascade vva structs
-      cascade{n}.gain = -cascade{n}.base_loss - cascade{n}.initial_attenuation;
-      cascade{n}.pout = cascade{n}.base_pin + cascade{n}.gain;
-      cascade{n}.NF = -cascade{n}.gain;
-      cascade{n}.OIP3 = cascade{n}.pout + cascade{n}.base_OIP3;
-      cascade{n} = rmfield(cascade{n},'gain_range');
-      cascade{n} = rmfield(cascade{n},'initial_attenuation');
-      cascade{n} = rmfield(cascade{n},'base_loss');
-      cascade{n} = rmfield(cascade{n},'base_pin');
-      cascade{n} = rmfield(cascade{n},'base_OIP3');
+      %Cleanup cascade_out vva structs
+      cascade_out{n}.gain = -cascade_out{n}.base_loss - cascade_out{n}.initial_attenuation;
+      cascade_out{n}.pout = cascade_out{n}.base_pin + cascade_out{n}.gain;
+      cascade_out{n}.NF = -cascade_out{n}.gain;
+      cascade_out{n}.OIP3 = cascade_out{n}.pout + cascade_out{n}.base_OIP3;
+      cascade_out{n} = rmfield(cascade_out{n},'gain_range');
+      cascade_out{n} = rmfield(cascade_out{n},'initial_attenuation');
+      cascade_out{n} = rmfield(cascade_out{n},'base_loss');
+      cascade_out{n} = rmfield(cascade_out{n},'base_pin');
+      cascade_out{n} = rmfield(cascade_out{n},'base_OIP3');
       
       total_range = total_range + vva{vvas + 1}.gain_range;
       vvas = vvas + 1;
@@ -52,35 +55,51 @@ if (strcmp(lower(on_off),'on') && ~isnan(receiver.pin))
    %AGC_Resolution dB resolution until further functionality is added later
 
    %So calculate initial value for metric
-   temp = calculate_cascade_parameters(cascade, receiver);
-   error_magnitude = cost_function(receiver.pin, temp.pout(1));
+   if isnan(receiver.next_largest_signal_dBm)
+      delta = 0;
+      total_input_power = receiver.pin;
+   else
+      delta = uncorrelated_power_combine([receiver.pin, receiver.next_largest_signal_dBm]) ...
+              - max(receiver.pin, receiver.next_largest_signal_dBm);
+
+      temp = [receiver.pin, receiver.next_largest_signal_dBm];
+      total_input_power = uncorrelated_power_combine(temp);
+   end
+
+   %Force the cascade solver to solve backwards for the input value
+   mach_receiver = receiver;
+   mach_receiver.pin = NaN;
+   mach_receiver.next_largest_signal_dBm = NaN;
+   temp = calculate_cascade_parameters(cascade_out, mach_receiver);
+   total_input_power_temp = temp.pout(1) + delta;
+   error_magnitude = cost_function(total_input_power, total_input_power_temp);
    
    if error_magnitude < 0
       error_magnitude = 0;
-      error(['The AGC cannot increase the power level enough to drive ' ...
-            ,'the converter to the desirable level.  Setting AGC ' ...
-            ,'to min attenuation and just solving for state of system.']);
+      warning(['The AGC cannot increase the power level enough to drive ' ...
+              ,'the converter to the desirable level.  Setting AGC ' ...
+              ,'to min attenuation and just solving for state of system.']);
 
       temp_attenuation = 0;
       for n = 1:1:vvas
-         cascade{cascade_locations(n)}.gain = vva{n}.gain(temp_attenuation);
-         cascade{cascade_locations(n)}.pout = vva{n}.pout(cascade{cascade_locations(n)}.gain);
-         cascade{cascade_locations(n)}.NF = vva{n}.NF(cascade{cascade_locations(n)}.gain);
-         cascade{cascade_locations(n)}.OIP3 = vva{n}.OIP3(cascade{cascade_locations(n)}.pout);
+         cascade_out{cascade_locations(n)}.gain = vva{n}.gain(temp_attenuation);
+         cascade_out{cascade_locations(n)}.pout = vva{n}.pout(cascade_out{cascade_locations(n)}.gain);
+         cascade_out{cascade_locations(n)}.NF = vva{n}.NF(cascade_out{cascade_locations(n)}.gain);
+         cascade_out{cascade_locations(n)}.OIP3 = vva{n}.OIP3(cascade_out{cascade_locations(n)}.pout);
       end
 
    elseif error_magnitude > total_range
       error_magnitude = 0;
-      error(['The AGC cannot decrease the power level enough to prevent ' ...
-            ,'the converter from being overdriven.  Setting AGC ' ...
-            ,'to max attenuation and just solving for state of system.']);
+      warning(['The AGC cannot decrease the power level enough to prevent ' ...
+              ,'the converter from being overdriven.  Setting AGC ' ...
+              ,'to max attenuation and just solving for state of system.']);
 
       for n = 1:1:vvas
          temp_attenuation = vva{n}.gain_range;
-         cascade{cascade_locations(n)}.gain = vva{n}.gain(temp_attenuation);
-         cascade{cascade_locations(n)}.pout = vva{n}.pout(cascade{cascade_locations(n)}.gain);
-         cascade{cascade_locations(n)}.NF = vva{n}.NF(cascade{cascade_locations(n)}.gain);
-         cascade{cascade_locations(n)}.OIP3 = vva{n}.OIP3(cascade{cascade_locations(n)}.pout);
+         cascade_out{cascade_locations(n)}.gain = vva{n}.gain(temp_attenuation);
+         cascade_out{cascade_locations(n)}.pout = vva{n}.pout(cascade_out{cascade_locations(n)}.gain);
+         cascade_out{cascade_locations(n)}.NF = vva{n}.NF(cascade_out{cascade_locations(n)}.gain);
+         cascade_out{cascade_locations(n)}.OIP3 = vva{n}.OIP3(cascade_out{cascade_locations(n)}.pout);
       end
 
    else
@@ -106,15 +125,16 @@ if (strcmp(lower(on_off),'on') && ~isnan(receiver.pin))
                assigned_attenuation = value_with_carry_over;
                carry_over = 0;
             end
-            vva{n}.current_attenuation = vva{n}.current_attenuation + assigned_attenuation; 
-            cascade{cascade_locations(n)}.gain = vva{n}.gain(vva{n}.current_attenuation);
-            cascade{cascade_locations(n)}.pout = vva{n}.pout(cascade{cascade_locations(n)}.gain);
-            cascade{cascade_locations(n)}.NF = vva{n}.NF(cascade{cascade_locations(n)}.gain);
-            cascade{cascade_locations(n)}.OIP3 = vva{n}.OIP3(cascade{cascade_locations(n)}.pout);
+            vva{n}.current_attenuation = positive_limit(vva{n}.current_attenuation + assigned_attenuation);
+            cascade_out{cascade_locations(n)}.gain = vva{n}.gain(vva{n}.current_attenuation);
+            cascade_out{cascade_locations(n)}.pout = vva{n}.pout(cascade_out{cascade_locations(n)}.gain);
+            cascade_out{cascade_locations(n)}.NF = vva{n}.NF(cascade_out{cascade_locations(n)}.gain);
+            cascade_out{cascade_locations(n)}.OIP3 = vva{n}.OIP3(cascade_out{cascade_locations(n)}.pout);
          end
-         
-         temp = calculate_cascade_parameters(cascade, receiver);
-         error_magnitude = cost_function(receiver.pin, temp.pout(1));
+
+         temp = calculate_cascade_parameters(cascade_out, mach_receiver);
+         total_input_power_temp = temp.pout(1) + delta;
+         error_magnitude = cost_function(total_input_power, total_input_power_temp);
       end
    end
 

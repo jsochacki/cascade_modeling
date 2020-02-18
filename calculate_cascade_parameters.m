@@ -74,6 +74,7 @@ for n = 1:1:max(size(cascade))
       cascade{n}.protected_gain = @protected_gain;
       cascade{n}.compression = @(signal_in_dBm, secondary_signal_in_dBm) cascade{n}.gain - cascade{n}.protected_gain(cascade{n}, signal_in_dBm, secondary_signal_in_dBm);
    elseif  (cascade{n}.pout ~= Inf) && (strcmp(lower(cascade{n}.name),'converter'))
+      cascade{n}.destruction_compression = 27;
       cascade{n}.IP1dB = cascade{n}.pout + 1;
       cascade{n}.IIP3 = cascade{n}.OIP3;
       %With full Clipping Modeled
@@ -100,7 +101,7 @@ if isnan(receiver.next_largest_signal_dBm)
 end
 
 direction = 'forward';
-if ~isnan(power_out_dBm)
+if isnan(power_in_dBm)
    %Suppose input level from linear calcualtions and then iterate until
    %accurate
    cascade_gain = 0;
@@ -111,25 +112,29 @@ if ~isnan(power_out_dBm)
 end
 
 error_magnitude = 1;
-while error_magnitude > 0.01
+while abs(error_magnitude) > 0.01
    if strcmp(direction,'forward')
       results.pout(1) = power_in_dBm;
       error_magnitude = 0;
    else
       results.pout(1) = (power_out_dBm - receiver.waveform_PAPR) - cascade_gain;
    end
+
    results.secondary_signal_pout(1) = receiver.next_largest_signal_dBm;
-   
+
    results.operational_signal_gain(1) = 0;
-   
+
    results.distortion_power(1) = -Inf;
-   
+
    cnf = 0;
    results.cumulative_gain(1) = results.operational_signal_gain(1);
    results.radio_noise_power(1) = results.receiver_input_noise_power + results.cumulative_gain(1) + cnf + 10*log10(receiver.radio_bandwidth);
-   
+
    temp = [results.pout(1), results.distortion_power(1), results.radio_noise_power(1)];
    results.in_band_power(1) = uncorrelated_power_combine(temp);
+
+   temp = [results.in_band_power(1), results.secondary_signal_pout(1)];
+   results.total_power(1) = uncorrelated_power_combine(temp);
 
    results.gain_compression(1) = 0;
    results.non_linear_noise_power_bandwidth(1) = 3 * receiver.channel_bandwidth;
@@ -148,7 +153,6 @@ while error_magnitude > 0.01
       cascade{n - 1}.operational_signal_gain = receiver_gain;
       results.operational_signal_gain(n) = receiver_gain;
 
-      previouse_distortion_power = results.distortion_power(n - 1) + receiver_gain;
       if isfield(cascade{n - 1}, 'IM3_dBm')
          temp = [results.in_band_power(n - 1), results.secondary_signal_pout(n - 1)];
          total_input_power = uncorrelated_power_combine(temp);
@@ -156,8 +160,8 @@ while error_magnitude > 0.01
       else
          added_distortion_power = -Inf;
       end
-      temp = [previouse_distortion_power, added_distortion_power];
-      results.distortion_power(n) =  uncorrelated_power_combine(temp);
+      temp = [results.distortion_power(n - 1), added_distortion_power];
+      results.distortion_power(n) =  uncorrelated_power_combine(temp) + receiver_gain;
 
       results.cumulative_gain(n) = results.cumulative_gain(n - 1) + receiver_gain;
       cnf = 10*log10(power(10, cnf / 10) + ((power(10, cascade{n - 1}.NF / 10) - 1) / power(10, results.cumulative_gain(n - 1) / 10)));
@@ -165,6 +169,9 @@ while error_magnitude > 0.01
 
       temp = [results.pout(n), results.distortion_power(n), results.radio_noise_power(n)];
       results.in_band_power(n) = uncorrelated_power_combine(temp);
+
+      temp = [results.in_band_power(n), results.secondary_signal_pout(n)];
+      results.total_power(n) = uncorrelated_power_combine(temp);
 
       results.gain_compression(n) = cascade{n - 1}.gain - receiver_gain;
 
@@ -174,23 +181,36 @@ while error_magnitude > 0.01
          array = array(1) - array;
          subset = array(find(array ~= Inf));
          ind = find(ismember(array,min(subset)));
+         if length(ind) > 1
+            %If it has more concentrated noise power it needs to be set
+            %over channel BW by picking 1 or 4 otherwise it is over the
+            %radio BW and is the the same whether you pick 2 or 3
+            if sum(ismember(ind, [1,4]))
+               ind = 1;
+            else
+               ind = 2;
+            end
+         end
          if isempty(ind)
             %They are all infinite or NaN so 
-            error('n = %d , element name is %s, receiver_gain = %d, subset array is [%d %d %d %d]', n, cascade{n - 1}.name, receiver_gain, results.pout(n - 1), results.distortion_power(n - 1), results.radio_noise_power(n - 1), results.secondary_signal_pout(n - 1));
-            error('All of the powers are infinite or NaN, you have issues');
+            warning('n = %d , element name is %s, receiver_gain = %d, subset array is [%d %d %d %d]', n, cascade{n - 1}.name, receiver_gain, results.pout(n - 1), results.distortion_power(n - 1), results.radio_noise_power(n - 1), results.secondary_signal_pout(n - 1));
+            warning('All of the powers are infinite or NaN, you have issues');
+            results.non_linear_noise_power_bandwidth(n) = 1;
          else
             switch ind
                case 1 %largest signal is primary signal so assume nonlinear distortion power is over 3 * channel BW
                   results.non_linear_noise_power_bandwidth(n) = 3 * receiver.channel_bandwidth;
                case 2 %largest signal is distortion power so assume nonlinear distortion power is over radio bandwidth
-                  results.non_linear_noise_power_bandwidth(n) = receiver.radio_bandwidth;
+                  %results.non_linear_noise_power_bandwidth(n) = receiver.radio_bandwidth;
+                  %largest signal is distortion power so assume nonlinear distortion power is over 3 * channel BW
+                  results.non_linear_noise_power_bandwidth(n) = 3 * receiver.channel_bandwidth;
                case 3 %largest signal is noise power so assume nonlinear distortion power is over radio bandwidth
                   results.non_linear_noise_power_bandwidth(n) = receiver.radio_bandwidth;
                case 4 %largest signal is secondary signal so assume nonlinear distortion power is over 3 * channel BW
                   results.non_linear_noise_power_bandwidth(n) = 3 * receiver.channel_bandwidth;
                otherwise
                   %Cant get here
-                  error('You got to a case you cant get to, investigate');
+                  warning('You got to a case you cant get to, investigate');
             end
          end
       else
@@ -205,9 +225,17 @@ while error_magnitude > 0.01
    if strcmp(direction,'backwards')
       %Set signal power only somehow
       %error = (power_out_dBm - receiver.waveform_PAPR) - results.pout(end);
-      %Set measured power to level (more realizable)
-      error_magnitude = (power_out_dBm - receiver.waveform_PAPR) - results.in_band_power(end);
-      cascade_gain = cascade_gain - 0.01;
+      %Set measured power to level (more realizable but still may not be the case if AGC is analog)
+      %error_magnitude = (power_out_dBm - receiver.waveform_PAPR) - results.in_band_power(end);
+      %Set measured power to level (Broadband power detection)
+      error_magnitude = (power_out_dBm - receiver.waveform_PAPR) - results.total_power(end);
+      if isnan(error_magnitude)
+         error_magnitude = 1;
+      elseif error_magnitude < 0
+         cascade_gain = cascade_gain + 0.01;
+      else
+         cascade_gain = cascade_gain - 0.01;
+      end
    end
 end
 
@@ -303,7 +331,7 @@ end
 %and SFDR/DFDR since it is correlated distortion to the signal and not random
 %additive noise and will not perform the same in trasking loops or STAP
 %etc... as pure additive noise would so it will be inaccurate for system
-%level calculations aside of what we are trying to do here with the
+%level calculations aside of what we are trying to do here with the QSYx
 %tool
 %Also, Noise figure is a measure of how system noise power is degraded and
 %only that.  It is defined as the 1 + Na/(Ni*G) where Ni is the

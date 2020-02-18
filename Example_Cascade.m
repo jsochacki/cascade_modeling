@@ -59,12 +59,14 @@ receiver.waveform_PAPR = 8;
 %a number
 receiver.next_largest_signal_dBm = NaN;
 
-%If you specify pout then you will solve the cascade based on the output
-%power set, PAPR, etc... for the input power
 %If you specify pin then you will solve the cascade based on the input
 %power set
+%If Pin is not specified then you must specify pout or have a converter at
+%the end of the cascade
 %Also note that any time you specify a converter at the end of the chain it
 %will have an associated pout and will solve from output to input
+%If you specify pout then you will solve the cascade based on the output
+%power set, PAPR, etc... for the input power
 receiver.pout = 10;
 receiver.pin = NaN;
 
